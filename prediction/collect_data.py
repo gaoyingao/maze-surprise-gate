@@ -104,4 +104,4 @@ def collect_predictor_data(episodes=300, history_len=4, save_path="prediction/pr
 
 if __name__ == "__main__":
     # 随机策略速度极快，跑 300 回合只需大约 3~5 秒
-    collect_predictor_data(episodes=1000, history_len=4)
+    collect_predictor_data(episodes=1500, history_len=8)
