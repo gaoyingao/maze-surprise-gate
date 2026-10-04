@@ -1,0 +1,21 @@
+{
+  "group": "C",
+  "episodes": 50,
+  "success_rate": 66.0,
+  "death_rate": 34.0,
+  "timeout_rate": 0.0,
+  "avg_steps": 13.78,
+  "avg_win_steps": 18.0,
+  "avg_reward": 6.122,
+  "total_llm_calls": 106,
+  "avg_llm_calls_per_episode": 2.12,
+  "interval": 0,
+  "tau": 1.5,
+  "elapsed_s": 276.8,
+  "first_choice_illegal_calls": 0,
+  "first_choice_illegal_pct": 0.0,
+  "masked_fallbacks": 0,
+  "parse_failures": 0,
+  "no_legal_choice": 0,
+  "avg_llm_latency_s": 2.61
+}

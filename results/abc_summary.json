@@ -1,0 +1,63 @@
+{
+  "groups": {
+    "A": {
+      "group": "A",
+      "episodes": 100,
+      "success_rate": 71.0,
+      "death_rate": 29.0,
+      "timeout_rate": 0.0,
+      "avg_steps": 14.42,
+      "avg_win_steps": 18.0,
+      "avg_reward": 6.851,
+      "total_llm_calls": 0,
+      "avg_llm_calls_per_episode": 0.0,
+      "interval": 0,
+      "tau": null,
+      "elapsed_s": 0.5
+    },
+    "B": {
+      "group": "B",
+      "episodes": 50,
+      "success_rate": 54.0,
+      "death_rate": 46.0,
+      "timeout_rate": 0.0,
+      "avg_steps": 12.64,
+      "avg_win_steps": 18.0,
+      "avg_reward": 4.391,
+      "total_llm_calls": 117,
+      "avg_llm_calls_per_episode": 2.34,
+      "interval": 6,
+      "tau": null,
+      "elapsed_s": 306.0,
+      "first_choice_illegal_calls": 0,
+      "first_choice_illegal_pct": 0.0,
+      "masked_fallbacks": 0,
+      "parse_failures": 0,
+      "no_legal_choice": 0,
+      "avg_llm_latency_s": 2.61
+    },
+    "C": {
+      "group": "C",
+      "episodes": 50,
+      "success_rate": 66.0,
+      "death_rate": 34.0,
+      "timeout_rate": 0.0,
+      "avg_steps": 13.78,
+      "avg_win_steps": 18.0,
+      "avg_reward": 6.122,
+      "total_llm_calls": 106,
+      "avg_llm_calls_per_episode": 2.12,
+      "interval": 0,
+      "tau": 1.5,
+      "elapsed_s": 276.8,
+      "first_choice_illegal_calls": 0,
+      "first_choice_illegal_pct": 0.0,
+      "masked_fallbacks": 0,
+      "parse_failures": 0,
+      "no_legal_choice": 0,
+      "avg_llm_latency_s": 2.61
+    }
+  },
+  "call_rate_match_pct": 10.4,
+  "matched": true
+}

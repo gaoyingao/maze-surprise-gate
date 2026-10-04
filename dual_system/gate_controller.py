@@ -128,6 +128,32 @@ class SurprisalGateController:
         return None, first_legal
 
     # ------------------------------------------------------------------ #
+    def decide(self, llm_pick_fn, ppo_action, agent_pos, monster_pos, goal_pos,
+               env, surprisal, log=None):
+        """
+        供 experiments/run.py 使用的统一接口，与 B 组的调用路径完全一致。
+
+        返回 (动作编号 | None, 是否被掩码顺延, 首选是否可行, 偏好序列)
+        None 表示本次不接管，调用方应继续用 PPO 动作。
+
+        只做门控判定（惊讶度阈值 + 冷却），LLM 调用与掩码交由 llm_pick_fn，
+        这样 C 组与 B 组走的是同一段 LLM 代码，唯一差别就是"何时调用"。
+        """
+        if self.cooldown_counter > 0:
+            self.cooldown_counter = max(0, self.cooldown_counter - 1)
+
+        if surprisal > self.tau and self.cooldown_counter == 0:
+            self.total_llm_calls += 1
+            self.cooldown_counter = self.cooldown_duration
+            act, masked, first_ok, ranking = llm_pick_fn(
+                None, env, agent_pos, monster_pos, goal_pos, log)
+            if act is None:
+                return None, False, first_ok, ranking
+            return act, masked, first_ok, ranking
+
+        return None, False, True, []
+
+    # ------------------------------------------------------------------ #
     def decide_action(self, ppo_action, agent_pos, monster_pos, goal_pos, surprisal):
         """
         返回 (最终动作编号, 决策来源字符串)
