@@ -33,12 +33,41 @@ ACTION_MAP = {
 }
 
 class MazeGame:
-    def __init__(self, with_monster=True, max_steps=200):
+    """
+    迷宫游戏规则。
+
+    Day 20 起支持可配置的怪物行为，便于做威胁度对照实验：
+
+        extra_walls    : 追加的墙 [(r,c), ...]（用于收窄地图、制造咽喉）
+        patrol_path    : 巡逻航点序列
+        chase_radius   : 进入多少格内触发追击（默认 3）
+        chase_prob     : 每步随机触发追击的概率（默认 0.05）
+        chase_len      : 一次追击持续多少步（默认 5）
+        monster_speed  : 怪物每步移动几格（默认 1）
+    """
+
+    def __init__(self, with_monster=True, max_steps=200,
+                 extra_walls=None, patrol_path=None,
+                 chase_radius=3, chase_prob=0.05, chase_len=5,
+                 monster_speed=1):
         self.with_monster = with_monster
         self.max_steps = max_steps
         self.grid = np.array(MAZE, dtype=np.int32)
+        for (r, c) in (extra_walls or []):
+            if 0 <= r < self.grid.shape[0] and 0 <= c < self.grid.shape[1]:
+                self.grid[r, c] = 1
         self.height, self.width = self.grid.shape
-        self.patrol_path = [(5, 4), (5, 8), (7, 8), (7, 4)]
+        self.patrol_path = list(patrol_path) if patrol_path else \
+            [(5, 4), (5, 8), (7, 8), (7, 4)]
+        self.chase_radius = chase_radius
+        self.chase_prob = chase_prob
+        self.chase_len = chase_len
+        self.monster_speed = monster_speed
+        # 起点/终点在任何配置下都必须是通路
+        assert self.grid[START] == 0, "起点被墙堵住"
+        assert self.grid[GOAL] == 0, "终点被墙堵住"
+        for p in self.patrol_path:
+            assert self.grid[p] == 0, f"巡逻点 {p} 是墙"
         self.reset()
 
     def reset(self, seed=None):
@@ -46,7 +75,11 @@ class MazeGame:
             random.seed(seed)
             np.random.seed(seed)
         self.agent_pos = list(START)
-        self.monster_pos = list(self.patrol_path[0])
+        # 无怪模式下把怪物放到地图外，确保它既不在观测里、也不可能碰撞。
+        # 旧实现把它冻在 patrol_path[0]（如 (5,4)），虽然观测里被置零，
+        # 但会把「有怪但不动」变成策略可分辨的分布外状态，污染对照实验。
+        self.monster_pos = list(self.patrol_path[0]) if self.with_monster \
+            else [-1, -1]
         self.patrol_idx = 0
         self.steps = 0
         self.chase_countdown = 0
@@ -72,12 +105,17 @@ class MazeGame:
     def _move_monster(self):
         if not self.with_monster:
             return
+        for _ in range(max(1, int(self.monster_speed))):
+            self._move_monster_once()
+
+    def _move_monster_once(self):
+        """怪物走一格：追击态朝智能体曼哈顿下降；否则沿巡逻航点前进"""
         dist_to_agent = abs(self.monster_pos[0] - self.agent_pos[0]) + abs(
             self.monster_pos[1] - self.agent_pos[1]
         )
-        if dist_to_agent <= 3 or random.random() < 0.05:
+        if dist_to_agent <= self.chase_radius or random.random() < self.chase_prob:
             if self.chase_countdown == 0:
-                self.chase_countdown = 5
+                self.chase_countdown = self.chase_len
 
         if self.chase_countdown > 0:
             self.chase_countdown -= 1
@@ -101,7 +139,10 @@ class MazeGame:
             if self.is_valid(next_pos):
                 self.monster_pos = next_pos
             else:
-                self.monster_pos = [self.monster_pos[0], self.monster_pos[1] + dc]
+                # 兜底：只走列方向，但仍要校验合法性，避免走进墙里
+                alt = [self.monster_pos[0], self.monster_pos[1] + dc]
+                if self.is_valid(alt):
+                    self.monster_pos = alt
 
     def step(self, action):
         self.steps += 1
@@ -137,9 +178,15 @@ class MazeGame:
 class MazeEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
 
-    def __init__(self, with_monster=True, max_steps=200):
+    def __init__(self, with_monster=True, max_steps=200, **game_kwargs):
+        """
+        game_kwargs 透传给 MazeGame，用于配置怪物行为 / 追加墙体：
+            extra_walls, patrol_path, chase_radius, chase_prob,
+            chase_len, monster_speed
+        """
         super().__init__()
-        self.game = MazeGame(with_monster=with_monster, max_steps=max_steps)
+        self.game = MazeGame(with_monster=with_monster, max_steps=max_steps,
+                             **game_kwargs)
         self.action_space = spaces.Discrete(4)
         self.observation_space = spaces.Box(
             low=-1.0,
@@ -150,7 +197,13 @@ class MazeEnv(gym.Env):
 
     def _get_obs(self):
         ar, ac = self.game.agent_pos
-        mr, mc = self.game.monster_pos
+
+        # 无怪模式下怪物不在图中，用哨兵值，保证任何通道都不会出现它
+        if self.game.with_monster:
+            mr, mc = self.game.monster_pos
+        else:
+            mr, mc = -1, -1
+
         gr, gc = GOAL
 
         view_wall = np.zeros((5, 5), dtype=np.float32)
@@ -195,28 +248,38 @@ class MazeEnv(gym.Env):
 
     def step(self, action):
         prev_ar, prev_ac = self.game.agent_pos
-        prev_dist = abs(prev_ar - GOAL[0]) + abs(prev_ac - GOAL[1])
+        prev_dist_goal = abs(prev_ar - GOAL[0]) + abs(prev_ac - GOAL[1])
 
         _, _, terminated, truncated, info = self.game.step(action)
         obs = self._get_obs()
 
         curr_ar, curr_ac = self.game.agent_pos
-        curr_dist = abs(curr_ar - GOAL[0]) + abs(curr_ac - GOAL[1])
+        curr_dist_goal = abs(curr_ar - GOAL[0]) + abs(curr_ac - GOAL[1])
 
-        # 核心奖励设定：
-        reward = -0.01  # 每走一步轻微时间消耗
+        # 1. 步数时间消耗（给前进压力）
+        reward = -0.01
+
+        # 2. 撞墙惩罚
         if info.get("hit_wall", False):
-            reward -= 0.05  # 撞墙额外惩罚，不要卡在死角
+            reward -= 0.05
         else:
-            progress = prev_dist - curr_dist
-            reward += progress * 0.1  # 靠近终点给 0.1 奖励
+            # 靠近终点奖励
+            progress = prev_dist_goal - curr_dist_goal
+            reward += progress * 0.1
 
+        # 3. 怪物危险感知惩罚（靠近怪物 <= 2 格扣分，鼓励绕道避险）
+        if self.game.with_monster:
+            dist_to_monster = abs(curr_ar - self.game.monster_pos[0]) + abs(curr_ac - self.game.monster_pos[1])
+            if dist_to_monster <= 2:
+                reward -= 0.05
+
+        # 4. 关键事件结算（根治挂机：超时惩罚严厉于被怪抓）
         status = info.get("status")
         if status == "win":
-            reward += 10.0  # 终点给予强力主奖励，吸引力拉满
+            reward += 10.0   # 成功主奖励
         elif status == "die":
-            reward -= 5.0
+            reward -= 4.0    # 撞怪被击杀
         elif status == "timeout":
-            reward -= 1.0
+            reward -= 10.0   # 超时摆烂直接判定重罚，逼它必须向前冲
 
         return obs, reward, terminated, truncated, info

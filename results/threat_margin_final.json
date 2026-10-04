@@ -1,0 +1,74 @@
+{
+  "baseline": {
+    "config": {},
+    "seeds": [
+      42,
+      777,
+      2024
+    ],
+    "episodes": 100,
+    "per_seed": [
+      {
+        "seed": 42,
+        "no": 100.0,
+        "yes": 78.0,
+        "margin": 22.0
+      },
+      {
+        "seed": 777,
+        "no": 100.0,
+        "yes": 89.0,
+        "margin": 11.0
+      },
+      {
+        "seed": 2024,
+        "no": 100.0,
+        "yes": 85.0,
+        "margin": 15.0
+      }
+    ],
+    "avg_no": 100.0,
+    "avg_yes": 84.0,
+    "avg_margin": 16.0,
+    "min_margin": 11.0,
+    "all_seeds_pass": false
+  },
+  "medium": {
+    "config": {
+      "chase_radius": 4,
+      "chase_prob": 0.1,
+      "chase_len": 6
+    },
+    "seeds": [
+      42,
+      777,
+      2024
+    ],
+    "episodes": 100,
+    "per_seed": [
+      {
+        "seed": 42,
+        "no": 100.0,
+        "yes": 71.0,
+        "margin": 29.0
+      },
+      {
+        "seed": 777,
+        "no": 100.0,
+        "yes": 79.0,
+        "margin": 21.0
+      },
+      {
+        "seed": 2024,
+        "no": 100.0,
+        "yes": 79.0,
+        "margin": 21.0
+      }
+    ],
+    "avg_no": 100.0,
+    "avg_yes": 76.33333333333333,
+    "avg_margin": 23.66666666666667,
+    "min_margin": 21.0,
+    "all_seeds_pass": true
+  }
+}

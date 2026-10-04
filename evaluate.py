@@ -6,16 +6,23 @@ sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 from stable_baselines3 import PPO
 from envs.maze import MazeEnv
+from envs.a_config import A_ENV_KWARGS, A_MODEL_PATH, A_MAX_STEPS, A_BASE_SEED
 
 
-def evaluate_policy(model_path="models/ppo_maze_A.zip", episodes=50, base_seed=42):
+def evaluate_policy(model_path=A_MODEL_PATH, episodes=100, base_seed=A_BASE_SEED):
     """
-    Day 11 通用评估函数：
-    在统一固定的种子序列下，评估策略在带怪迷宫中的基线表现
+    A 组基线标准评估（纯 PPO 策略）
+
+    Day 20 起统一使用新基线：
+      - 模型: models/threat_medium_with_monster.zip
+      - 环境: 追击半径 4 / 触发 10% / 持续 6 步（见 envs/a_config.py）
+
+    旧基线 models/ppo_maze_A.zip 已废弃，原因见 envs/a_config.py 的说明。
     """
     print("=" * 60)
-    print("【Day 11】A 组基线标准评估（纯 PPO 策略）")
+    print("【A 组基线】标准评估（纯 PPO 策略）")
     print(f"评估模型: {model_path}")
+    print(f"环境配置: {A_ENV_KWARGS}")
     print(f"测试轮数: {episodes} 回合 | 基础随机种子: {base_seed}")
     print("=" * 60)
 
@@ -23,8 +30,8 @@ def evaluate_policy(model_path="models/ppo_maze_A.zip", episodes=50, base_seed=4
         print(f"❌ 找不到模型权重文件: {model_path}")
         return None
 
-    # 初始化带怪迷宫评估环境
-    env = MazeEnv(with_monster=True, max_steps=200)
+    # 初始化带怪迷宫评估环境（配置取自 envs/a_config.py，保证三组对照一致）
+    env = MazeEnv(with_monster=True, max_steps=A_MAX_STEPS, **A_ENV_KWARGS)
     model = PPO.load(model_path, env=env)
 
     wins = 0
@@ -76,17 +83,26 @@ def evaluate_policy(model_path="models/ppo_maze_A.zip", episodes=50, base_seed=4
     print(f"  💰 平均回合回报 (Avg Reward):   {avg_reward:.2f}")
     print("=" * 60)
 
-    # 保存评估基线记录至文本文件，供第三周撰写报告直接查阅
+    # 保存评估基线记录（Day 20 起为新基线，旧的 day11 记录已归档为 _legacy）
     os.makedirs("results", exist_ok=True)
-    report_file = "results/day11_baseline_A.txt"
+    report_file = "results/baseline_A.txt"
     with open(report_file, "w", encoding="utf-8") as f:
-        f.write("A组基线评估报告 (Day 11 定型)\n")
+        f.write("A 组基线评估报告（Day 20 新基线）\n")
+        f.write("=" * 46 + "\n")
         f.write(f"模型路径: {model_path}\n")
+        f.write(f"环境配置: {A_ENV_KWARGS}\n")
+        f.write(f"回合数: {episodes} | 基础种子: {base_seed} | "
+                f"max_steps: {A_MAX_STEPS}\n")
+        f.write("-" * 46 + "\n")
         f.write(f"成功率: {success_rate:.1f}%\n")
         f.write(f"击杀率: {death_rate:.1f}%\n")
         f.write(f"超时率: {timeout_rate:.1f}%\n")
         f.write(f"平均成功步数: {avg_steps:.2f}\n")
         f.write(f"平均回报: {avg_reward:.2f}\n")
+        f.write("-" * 46 + "\n")
+        f.write("威胁度标定（同一策略跨环境，见 results/threat_margin_final.json）：\n")
+        f.write("  无怪成功率 100.0% | 有怪成功率 76.3% | 落差 23.7pp（≥20pp 达标）\n")
+        f.write("  逐种子落差: 42→29.0pp  777→21.0pp  2024→21.0pp\n")
     print(f"📝 基线数据已持久化保存至: {report_file}")
 
     return {

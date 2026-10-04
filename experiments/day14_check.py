@@ -11,6 +11,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from stable_baselines3 import PPO
 from envs.maze import MazeEnv
+from envs.a_config import A_ENV_KWARGS, A_MODEL_PATH, A_MAX_STEPS, A_BASE_SEED
 from prediction.train_predictor import MonsterPredictor
 from prediction.collect_data import OFFSET_TO_ACTION
 
@@ -65,6 +66,95 @@ def test_llm_availability(test_times=20):
     return llm_acc
 
 
+def _run_episodes(model, env_kwargs, with_monster, episodes, base_seed, max_steps):
+    """跑一批回合，返回 (成功率%, 击杀率%, 超时率%, 平均步数)"""
+    env = MazeEnv(with_monster=with_monster, max_steps=max_steps, **env_kwargs)
+    wins = deaths = timeouts = 0
+    step_records = []
+
+    for ep in range(episodes):
+        obs, _ = env.reset(seed=base_seed + ep * 100)
+        done = False
+        steps = 0
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, _, terminated, truncated, info = env.step(int(action))
+            steps += 1
+            done = terminated or truncated
+            if terminated:
+                if info.get("status") == "win":
+                    wins += 1
+                    step_records.append(steps)
+                else:
+                    deaths += 1
+                break
+            if truncated:
+                timeouts += 1
+                break
+
+    avg_steps = float(np.mean(step_records)) if step_records else 0.0
+    return (100.0 * wins / episodes, 100.0 * deaths / episodes,
+            100.0 * timeouts / episodes, avg_steps)
+
+
+def check_threat_margin(episodes=100, base_seed=A_BASE_SEED, max_steps=A_MAX_STEPS,
+                        threshold_pp=20.0, seeds=None):
+    """
+    检查项 ①（生死线）：怪物是否构成实质威胁。
+
+    Day 20 起改用【同一策略跨环境】口径 —— 这是唯一站得住脚的对照方式：
+        用同一个策略，分别在无怪 / 有怪环境各跑 N 回合，比较成功率。
+
+    旧实现用两个不同模型（ppo_maze_A vs ppo_maze_no_monster）互相比，
+    两者都退化（一个无怪 0% 超时、一个有怪 0% 被吃），结论不可信。
+
+    返回 (平均落差pp, 是否通过)
+    """
+    print("\n" + "=" * 66)
+    print("【检查项 ①】怪物威胁度对照（同一策略跨环境）")
+    print("=" * 66)
+
+    model_path = A_MODEL_PATH
+    if not os.path.exists(model_path):
+        print(f"❌ 找不到模型权重: {model_path}")
+        return None, False
+
+    model = PPO.load(model_path,
+                     env=MazeEnv(with_monster=True, max_steps=max_steps,
+                                 **A_ENV_KWARGS))
+    if seeds is None:
+        seeds = [42, 777, 2024]
+
+    print(f"策略: {model_path}")
+    print(f"环境配置: {A_ENV_KWARGS}")
+    print(f"每个种子 {episodes} 回合 | max_steps: {max_steps}")
+    print("-" * 66)
+    print(f"{'种子':<8}{'无怪成功':>10}{'有怪成功':>10}{'落差pp':>9}"
+          f"{'有怪击杀':>10}")
+    print("-" * 66)
+
+    margins = []
+    for sd in seeds:
+        no_succ, no_die, no_to, _ = _run_episodes(
+            model, A_ENV_KWARGS, False, episodes, sd, max_steps)
+        yes_succ, yes_die, yes_to, yes_steps = _run_episodes(
+            model, A_ENV_KWARGS, True, episodes, sd, max_steps)
+        m = no_succ - yes_succ
+        margins.append(m)
+        print(f"{sd:<8}{no_succ:>9.1f}%{yes_succ:>9.1f}%{m:>9.1f}{yes_die:>9.1f}%")
+
+    avg_margin = float(np.mean(margins))
+    print("-" * 66)
+    print(f"平均落差: {avg_margin:.1f} pp   最小落差: {min(margins):.1f} pp")
+    print(f"计划书门槛: ≥ {threshold_pp:.1f} pp（每个种子都要达标）")
+
+    passed = min(margins) >= threshold_pp
+    print(f"判定: {'✅ 通过' if passed else '❌ 未通过'}")
+    print("=" * 66)
+
+    return avg_margin, passed
+
+
 def run_surprisal_check(episodes=50, history_len=4):
     """
     检查项 ① & ②：因果时序校准 + 怪物自身绝对轨迹惊讶度计算
@@ -73,11 +163,11 @@ def run_surprisal_check(episodes=50, history_len=4):
     print("【检查项 ① & ②】运行 PPO 策略，计算惊讶度并生成多模态时序图...")
     print("=" * 60)
 
-    rl_model_path = "models/ppo_maze_A.zip"
+    rl_model_path = A_MODEL_PATH
     predictor_path = "prediction/monster_predictor.pth"
 
     if not os.path.exists(rl_model_path) or not os.path.exists(predictor_path):
-        print("❌ 未找到模型权重，请确认 Day 11/13 文件存在！")
+        print(f"❌ 未找到模型权重: {rl_model_path} 或 {predictor_path}")
         return
 
     device = torch.device("cpu")
@@ -85,7 +175,7 @@ def run_surprisal_check(episodes=50, history_len=4):
     predictor.load_state_dict(torch.load(predictor_path, map_location=device))
     predictor.eval()
 
-    env = MazeEnv(with_monster=True, max_steps=200)
+    env = MazeEnv(with_monster=True, max_steps=A_MAX_STEPS, **A_ENV_KWARGS)
     ppo_model = PPO.load(rl_model_path, env=env)
 
     best_record = None
@@ -222,5 +312,10 @@ def run_surprisal_check(episodes=50, history_len=4):
 
 
 if __name__ == "__main__":
-    test_llm_availability(5)
+    # 检查项 ①：怪物威胁度（生死线）—— 真正计算，不再硬编码通过
+    check_threat_margin(episodes=100, base_seed=A_BASE_SEED,
+                        max_steps=A_MAX_STEPS)
+    # 检查项 ③：LLM 方向解析稳定性（计划书要求 20 次）
+    test_llm_availability(20)
+    # 检查项 ②：惊讶度动力学
     run_surprisal_check(episodes=50, history_len=4)

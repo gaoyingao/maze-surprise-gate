@@ -1,5 +1,9 @@
 __pycache__/
 *.pyc
-*.zip
 .vscode/
 .idea/
+
+# 模型权重：根目录的临时产物忽略，但 models/ 下的基线 checkpoint 必须入库
+# （A 组新基线 threat_medium_with_monster.zip 是三组对照复现的前提）
+/*.zip
+!models/*.zip
