@@ -1,179 +1,241 @@
+# -*- coding: utf-8 -*-
+"""
+prediction/train_predictor.py —— Day 13：训练 GRU 怪物动作预测器
+
+计划书要求
+    输入 (B, T=4, 2) 怪物位置序列 -> GRU + Linear -> 5 类（上下左右不动）
+    交叉熵损失、训练若干轮
+    **巡逻段准确率应 > 90%，追击段应明显下降**（这个落差就是惊讶度的来源）
+
+为什么追击段必然下降
+    怪物在巡逻时沿固定航点走，只看它自己的历史位置就能预测；
+    但追击时它朝智能体做曼哈顿下降，而智能体的位置**不在预测器输入里**，
+    所以追击动作在给定输入下本质上不可预测 —— 准确率下降是设计使然，
+    不是模型没训好。这一点必须在报告里写清楚。
+
+Day 21 修订
+    1. 训练/评估环境均取自 envs/a_config.py，与 A 组基线一致
+    2. 按数据里记录的 mode 字段切分巡逻/追击（不再事后用 chase_countdown 猜）
+    3. 评估在【固定 A 组策略】下进行，贴近部署分布
+
+用法
+    python prediction/train_predictor.py
+    python prediction/train_predictor.py --epochs 60 --history-len 4
+"""
+
+import argparse
 import os
 import sys
+
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 
-# 将项目根目录加入模块搜索路径
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from envs.maze import MazeEnv
+from envs.a_config import A_ENV_KWARGS, A_MODEL_PATH, A_MAX_STEPS
+from prediction.collect_data import OFFSET_TO_ACTION, MODE_PATROL, MODE_CHASE
 
 
 class MonsterPredictor(nn.Module):
     """
-    Day 13 怪物动作预测器：
-    输入怪物自身过去 T 步的绝对坐标，学习巡逻规律
+    输入怪物自身过去 T 步的绝对坐标（归一化），预测它的下一步动作。
+    GRU(hidden) + Linear(hidden, 5)
     """
-    def __init__(self, input_dim=2, hidden_dim=128, num_classes=5):
+
+    def __init__(self, input_dim=2, hidden_dim=128, num_classes=5, num_layers=1):
         super().__init__()
-        self.gru = nn.GRU(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            batch_first=True
-        )
+        self.gru = nn.GRU(input_size=input_dim, hidden_size=hidden_dim,
+                          num_layers=num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_dim, num_classes)
 
     def forward(self, x):
-        # x 形状: (B, T, 2)
         out, _ = self.gru(x)
-        last_out = out[:, -1, :]     # 取最后一帧隐状态
-        logits = self.fc(last_out)   # (B, 5)
-        return logits
+        return self.fc(out[:, -1, :])
 
 
-def train_predictor():
-    print("=" * 60)
-    print("【Day 13】训练 GRU 怪物动作预测器（怪物绝对坐标版）")
-    print("=" * 60)
+# ----------------------------------------------------------------------
+def train(data_path, save_path, epochs, batch_size, lr, hidden_dim, seed):
+    print("=" * 68)
+    print("【Day 13】训练 GRU 怪物动作预测器")
+    print("=" * 68)
 
-    data_path = "prediction/predictor_data.npz"
     if not os.path.exists(data_path):
-        print(f"❌ 未找到数据集: {data_path}，请先运行 prediction/collect_data.py！")
-        return
+        print(f"❌ 未找到数据集: {data_path}")
+        print("   请先运行: python prediction/collect_data.py")
+        return None
 
-    # 1. 加载数据
-    data = np.load(data_path)
-    X = data["X"]  # (N, T, 2)
-    y = data["y"]  # (N,)
+    d = np.load(data_path, allow_pickle=True)
+    X, y = d["X"], d["y"]
+    mode = d["mode"] if "mode" in d else np.zeros(len(y), dtype=np.int64)
     history_len = X.shape[1]
-    print(f"成功加载数据集: 样本总量 = {len(X)} 条 | 历史窗口 T = {history_len}")
+    print(f"  数据: {data_path}")
+    print(f"  样本 {len(X)} 条 | T={history_len} | 特征 {X.shape[2]} 维")
+    print(f"  巡逻样本 {int((mode==MODE_PATROL).sum())} | "
+          f"追击样本 {int((mode==MODE_CHASE).sum())}")
+    if "env_kwargs" in d:
+        print(f"  采集时环境: {d['env_kwargs'][0]}")
+        print(f"  采集时策略: {d['policy'][0]}")
+    print(f"  当前 A 组环境: {A_ENV_KWARGS}")
 
-    # 2. 划分训练集与验证集 (85% / 15%)
-    indices = np.arange(len(X))
-    np.random.seed(42)
-    np.random.shuffle(indices)
+    # ---- 划分 ----
+    idx = np.arange(len(X))
+    np.random.seed(seed)
+    np.random.shuffle(idx)
+    split = int(len(X) * 0.85)
+    tr, va = idx[:split], idx[split:]
 
-    split_idx = int(len(X) * 0.85)
-    train_idx, val_idx = indices[:split_idx], indices[split_idx:]
+    def ds(ix):
+        return TensorDataset(torch.tensor(X[ix]), torch.tensor(y[ix]))
 
-    X_train, y_train = torch.tensor(X[train_idx]), torch.tensor(y[train_idx])
-    X_val, y_val = torch.tensor(X[val_idx]), torch.tensor(y[val_idx])
+    tr_loader = DataLoader(ds(tr), batch_size=batch_size, shuffle=True)
+    va_loader = DataLoader(ds(va), batch_size=256, shuffle=False)
 
-    train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=128, shuffle=True)
-    val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=256, shuffle=False)
-
-    # 3. 初始化网络与优化器
     device = torch.device("cpu")
-    model = MonsterPredictor(input_dim=2, hidden_dim=128, num_classes=5).to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    model = MonsterPredictor(2, hidden_dim, 5).to(device)
+    crit = nn.CrossEntropyLoss()
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
 
-    # 4. 训练 40 轮
-    epochs = 40
-    print(f"开始训练，共 {epochs} 轮 (Epochs)...")
+    print(f"\n  超参: hidden={hidden_dim} epochs={epochs} lr={lr} "
+          f"batch={batch_size} 划分=85/15")
+    print("-" * 68)
 
-    for epoch in range(1, epochs + 1):
+    for ep in range(1, epochs + 1):
         model.train()
-        total_loss = 0.0
-        correct_train = 0
-        total_train = 0
-
-        for batch_x, batch_y in train_loader:
-            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
-            optimizer.zero_grad()
-
-            logits = model(batch_x)
-            loss = criterion(logits, batch_y)
+        tot = 0.0
+        for bx, by in tr_loader:
+            bx, by = bx.to(device), by.to(device)
+            opt.zero_grad()
+            loss = crit(model(bx), by)
             loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item() * len(batch_y)
-            preds = torch.argmax(logits, dim=1)
-            correct_train += (preds == batch_y).sum().item()
-            total_train += len(batch_y)
-
-        train_loss = total_loss / total_train
-        train_acc = (correct_train / total_train) * 100.0
-
-        if epoch % 10 == 0 or epoch == epochs:
+            opt.step()
+            tot += loss.item() * len(by)
+        if ep % 10 == 0 or ep == epochs:
             model.eval()
-            correct_val = 0
-            total_val = 0
+            c = t = 0
             with torch.no_grad():
-                for batch_x, batch_y in val_loader:
-                    batch_x, batch_y = batch_x.to(device), batch_y.to(device)
-                    logits = model(batch_x)
-                    preds = torch.argmax(logits, dim=1)
-                    correct_val += (preds == batch_y).sum().item()
-                    total_val += len(batch_y)
+                for bx, by in va_loader:
+                    p = torch.argmax(model(bx.to(device)), dim=1).cpu()
+                    c += (p == by).sum().item()
+                    t += len(by)
+            print(f"  Epoch {ep:>3}/{epochs} | loss {tot/len(tr):.4f} | "
+                  f"验证准确率 {100*c/t:.1f}%")
 
-            val_acc = (correct_val / total_val) * 100.0
-            print(f"Epoch [{epoch:02d}/{epochs}] | Loss: {train_loss:.4f} | 训练准确率: {train_acc:.1f}% | 验证准确率: {val_acc:.1f}%")
-
-    # 5. 保存模型权重
-    save_path = "prediction/monster_predictor.pth"
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
     torch.save(model.state_dict(), save_path)
-    print("\n" + "-" * 50)
-    print(f"💾 预测器模型已保存至: {save_path}")
-
-    # 6. 环境实测验证
-    evaluate_segments(model, device, history_len=history_len)
+    print(f"\n  💾 已保存: {save_path}")
+    return model
 
 
-def evaluate_segments(model, device, history_len=4):
-    print("\n" + "=" * 60)
-    print("开始进行环境实测验证（巡逻段 vs 追击段对比）...")
-    print("=" * 60)
+# ----------------------------------------------------------------------
+def evaluate_segments(model, history_len, episodes=50, seed_base=20000,
+                      policy="ppo", device="cpu"):
+    """
+    在【A 组策略】下跑回合，按模式分别统计预测准确率。
+    计划书标准：巡逻段 > 90%，追击段明显下降。
+    """
+    print("\n" + "=" * 68)
+    print("环境实测：巡逻段 vs 追击段 预测准确率")
+    print("=" * 68)
 
-    from envs.maze import MazeEnv
-    from prediction.collect_data import OFFSET_TO_ACTION
+    env = MazeEnv(with_monster=True, max_steps=A_MAX_STEPS, **A_ENV_KWARGS)
+    ppo = None
+    if policy == "ppo":
+        from stable_baselines3 import PPO
+        ppo = PPO.load(A_MODEL_PATH, env=env)
+    print(f"  评估策略: {policy} | 环境: {A_ENV_KWARGS} | {episodes} 回合")
 
-    env = MazeEnv(with_monster=True, max_steps=200)
     model.eval()
+    stat = {MODE_PATROL: [0, 0], MODE_CHASE: [0, 0]}   # mode -> [correct, total]
+    probs_by_mode = {MODE_PATROL: [], MODE_CHASE: []}
+    chase_count = 0
 
-    patrol_correct, patrol_total = 0, 0
-    chase_correct, chase_total = 0, 0
-
-    for ep in range(30):
-        env.reset(seed=20000 + ep)
+    for ep in range(episodes):
+        obs, _ = env.reset(seed=seed_base + ep)
         done = False
-        monster_history = []
-
+        hist = []
         while not done:
             mr, mc = env.game.monster_pos
-            monster_history.append([mr / 11.0, mc / 11.0])
+            hist.append([mr / 11.0, mc / 11.0])
+            prev_m = [int(mr), int(mc)]
 
-            prev_m_pos = list(env.game.monster_pos)
-            obs, _, terminated, truncated, _ = env.step(env.action_space.sample())
-            done = terminated or truncated
-
-            curr_m_pos = list(env.game.monster_pos)
-            dr = curr_m_pos[0] - prev_m_pos[0]
-            dc = curr_m_pos[1] - prev_m_pos[1]
-            true_act = OFFSET_TO_ACTION.get((dr, dc), 4)
-
-            if len(monster_history) >= history_len:
-                seq = torch.tensor([monster_history[-history_len:]], dtype=torch.float32).to(device)
+            probs = None
+            if len(hist) >= history_len:
+                seq = torch.tensor([hist[-history_len:]], dtype=torch.float32).to(device)
                 with torch.no_grad():
-                    logits = model(seq)
-                    pred_act = torch.argmax(logits, dim=1).item()
+                    probs = torch.softmax(model(seq), dim=1).squeeze(0).cpu().numpy()
 
-                is_correct = (pred_act == true_act)
-                if env.game.chase_countdown > 0:
-                    chase_correct += int(is_correct)
-                    chase_total += 1
-                else:
-                    patrol_correct += int(is_correct)
-                    patrol_total += 1
+            if ppo is not None:
+                a, _ = ppo.predict(obs, deterministic=True)
+                a = int(a)
+            else:
+                a = int(env.action_space.sample())
+            obs, _, term, trunc, _ = env.step(a)
+            done = term or trunc
 
-    patrol_acc = (patrol_correct / patrol_total) * 100.0 if patrol_total else 0.0
-    chase_acc = (chase_correct / chase_total) * 100.0 if chase_total else 0.0
+            # 模式由环境权威给出，与采集脚本口径完全一致
+            mode = MODE_CHASE if env.game.monster_chasing else MODE_PATROL
+            if mode == MODE_CHASE:
+                chase_count += 1
 
-    print("📊 细分场景准确率评估：")
-    print(f"  🌀 巡逻段预测准确率: {patrol_acc:.1f}% ({patrol_correct}/{patrol_total})")
-    print(f"  ⚡ 追击段预测准确率: {chase_acc:.1f}% ({chase_correct}/{chase_total})")
-    print("-" * 50)
+            cur_m = [int(x) for x in env.game.monster_pos]
+            true_act = OFFSET_TO_ACTION.get((cur_m[0]-prev_m[0], cur_m[1]-prev_m[1]), 4)
+
+            if probs is not None:
+                pred = int(np.argmax(probs))
+                stat[mode][0] += int(pred == true_act)
+                stat[mode][1] += 1
+                probs_by_mode[mode].append(float(probs[true_act]))
+
+    names = {MODE_PATROL: "巡逻段", MODE_CHASE: "追击段"}
+    result = {}
+    print("-" * 68)
+    for m in (MODE_PATROL, MODE_CHASE):
+        c, t = stat[m]
+        acc = 100 * c / t if t else 0.0
+        ps = probs_by_mode[m]
+        avg_s = float(-np.log(max(np.mean(ps), 1e-9))) if ps else 0.0
+        result[m] = dict(acc=acc, correct=c, total=t, avg_surprisal=avg_s)
+        print(f"  {names[m]}: 准确率 {acc:5.1f}%  ({c}/{t})   "
+              f"平均惊讶度 {avg_s:.2f} nats")
+
+    pa = result[MODE_PATROL]["acc"]
+    ca = result[MODE_CHASE]["acc"]
+    gap = pa - ca
+    print("-" * 68)
+    print(f"  准确率落差 (巡逻 - 追击): {gap:.1f} 个百分点")
+    print(f"  计划书标准: 巡逻段 > 90% 且 追击段明显下降")
+    c1 = pa > 90
+    c2 = gap > 15
+    print(f"    巡逻段 >90%      : {'✅' if c1 else '❌'} ({pa:.1f}%)")
+    print(f"    追击段明显下降    : {'✅' if c2 else '❌'} (落差 {gap:.1f}pp)")
+    return result
+
+
+# ----------------------------------------------------------------------
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", default="prediction/predictor_data.npz")
+    ap.add_argument("--save", default="prediction/monster_predictor.pth")
+    ap.add_argument("--epochs", type=int, default=50)
+    ap.add_argument("--batch-size", type=int, default=128)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--hidden-dim", type=int, default=128)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--episodes", type=int, default=50)
+    ap.add_argument("--eval-policy", default="ppo", choices=["ppo", "random"])
+    args = ap.parse_args()
+
+    model = train(args.data, args.save, args.epochs, args.batch_size,
+                  args.lr, args.hidden_dim, args.seed)
+    if model is None:
+        return
+    d = np.load(args.data, allow_pickle=True)
+    evaluate_segments(model, d["X"].shape[1], episodes=args.episodes,
+                      policy=args.eval_policy)
 
 
 if __name__ == "__main__":
-    train_predictor()
+    main()

@@ -179,6 +179,7 @@ def run_surprisal_check(episodes=50, history_len=4):
     ppo_model = PPO.load(rl_model_path, env=env)
 
     best_record = None
+    best_score = -1
 
     for ep in range(episodes):
         obs, _ = env.reset(seed=8000 + ep)
@@ -216,8 +217,10 @@ def run_surprisal_check(episodes=50, history_len=4):
             dc = curr_m_pos[1] - prev_m_pos[1]
             true_act = OFFSET_TO_ACTION.get((dr, dc), 4)
 
-            # 5. 追击模式判定
-            curr_is_chase = (env.game.chase_countdown > 0)
+            # 5. 追击模式判定 —— 由环境权威给出，与采集/训练脚本口径一致。
+            #    旧版用 chase_countdown > 0 事后判断，会把"追击的第 1 步"
+            #    错分进巡逻桶，导致巡逻均值虚高。
+            curr_is_chase = bool(env.game.monster_chasing)
             if curr_is_chase and not prev_chase:
                 switch_moments.append(step)
             prev_chase = curr_is_chase
@@ -230,40 +233,56 @@ def run_surprisal_check(episodes=50, history_len=4):
                 is_chase_list.append(curr_is_chase)
                 step += 1
 
-        # 选取包含追击事件、步数在 18~35 步之间的典型回合
-        if len(switch_moments) >= 1 and 18 <= step <= 35:
+        # 选取"两种模式都有足够样本、且至少一次切换"的回合做可视化。
+        # 旧条件要求 18<=step<=35，但 A 组策略平均 18 步到终点，该窗口选不中；
+        # 并且必须同时含巡逻与追击样本，否则图上无法展示"低-高"对比。
+        n_chase = int(sum(is_chase_list))
+        n_patrol = int(len(is_chase_list) - n_chase)
+        score = min(n_patrol, n_chase) * 10 + len(switch_moments)
+        if (len(switch_moments) >= 1 and n_chase >= 3 and n_patrol >= 3
+                and score > best_score):
+            best_score = score
             best_record = {
                 "surprisals": surprisals,
                 "switch_moments": switch_moments,
-                "is_chase": is_chase_list
+                "is_chase": is_chase_list,
+                "episode": ep,
+                "n_chase": n_chase,
+                "n_patrol": n_patrol,
+                "total_steps": step,
             }
-            break
 
     if not best_record:
-        print("未抓取到典型长度回合，请调大 episodes。")
+        print("未抓取到同时含巡逻与追击的回合，请调大 episodes。")
         return
+
+    print(f"  代表回合: ep={best_record['episode']} | 总步数 "
+          f"{best_record['total_steps']} | 巡逻 {best_record['n_patrol']} 步 "
+          f"| 追击 {best_record['n_chase']} 步 "
+          f"| 模式切换 {len(best_record['switch_moments'])} 次")
 
     surps = np.array(best_record["surprisals"])
     chases = np.array(best_record["is_chase"])
 
-    # 稳态巡逻均值：剔除追击及追击后 3 步折返期的影响
-    pure_patrol_surps = []
-    cooldown = 0
-    for s_val, is_c in zip(surps, chases):
-        if is_c:
-            cooldown = 3
-        else:
-            if cooldown > 0:
-                cooldown -= 1
-            else:
-                pure_patrol_surps.append(s_val)
+    # 模式切分已由环境权威给出，不再需要"追击后 N 步冷却"这类人工启发式
+    pure_patrol_surps = surps[~chases]
+    chase_surps = surps[chases]
 
-    mean_patrol = np.mean(pure_patrol_surps) if pure_patrol_surps else np.mean(surps[~chases])
-    max_chase = np.max(surps[chases]) if np.any(chases) else 0.0
+    mean_patrol = float(np.mean(pure_patrol_surps)) if len(pure_patrol_surps) else 0.0
+    max_chase = float(np.max(chase_surps)) if len(chase_surps) else 0.0
+    mean_chase = float(np.mean(chase_surps)) if len(chase_surps) else 0.0
 
-    print("📊 修正后的惊讶度统计：")
-    print(f"  - 稳态巡逻平均惊讶度: {mean_patrol:.2f} nats (标准要求: 处于低位)")
-    print(f"  - 追击段最高爆发峰值: {max_chase:.2f} nats (标准要求: 产生 >2.0 尖峰)")
+    # Go/No-Go 判定（计划书：巡逻 <0.5，切换瞬间 >2.0）
+    c_patrol = mean_patrol < 0.5
+    c_peak = max_chase > 2.0
+
+    print("📊 惊讶度统计（模式由环境权威切分）：")
+    print(f"  - 巡逻段平均惊讶度: {mean_patrol:.2f} nats   "
+          f"(标准 <0.5) {'✅' if c_patrol else '❌'}")
+    print(f"  - 追击段平均惊讶度: {mean_chase:.2f} nats")
+    print(f"  - 追击段最高峰值  : {max_chase:.2f} nats   "
+          f"(标准 >2.0) {'✅' if c_peak else '❌'}")
+    print(f"  - 巡逻样本 {len(pure_patrol_surps)} | 追击样本 {len(chase_surps)}")
 
     # 绘图
     os.makedirs("figures", exist_ok=True)

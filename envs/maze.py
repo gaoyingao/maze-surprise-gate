@@ -83,6 +83,7 @@ class MazeGame:
         self.patrol_idx = 0
         self.steps = 0
         self.chase_countdown = 0
+        self.monster_chasing = False
         return self.agent_pos, self.monster_pos
 
     def is_valid(self, pos):
@@ -104,7 +105,9 @@ class MazeGame:
 
     def _move_monster(self):
         if not self.with_monster:
+            self.monster_chasing = False
             return
+        self.monster_chasing = False
         for _ in range(max(1, int(self.monster_speed))):
             self._move_monster_once()
 
@@ -116,6 +119,11 @@ class MazeGame:
         if dist_to_agent <= self.chase_radius or random.random() < self.chase_prob:
             if self.chase_countdown == 0:
                 self.chase_countdown = self.chase_len
+
+        # 记录本步是否处于追击态 —— 供 predict/gate 做模式切分。
+        # 必须在倒计时递减【之前】判定，否则"追击的第 1 步"会被漏掉。
+        if self.chase_countdown > 0:
+            self.monster_chasing = True
 
         if self.chase_countdown > 0:
             self.chase_countdown -= 1
