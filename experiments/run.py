@@ -80,13 +80,16 @@ def _llm_pick(gate_or_none, env, agent_pos, monster_pos, goal_pos, log):
 
 
 # ----------------------------------------------------------------------
-def run_episode(mode, model, env, seed, interval=1, gate=None, log=None):
+def run_episode(mode, model, env, seed, interval=1, gate=None, log=None,
+                goal_pos=None):
     obs, _ = env.reset(seed=seed)
     steps = 0
     total_reward = 0.0
     done = False
     info = {}
     calls = 0
+    if goal_pos is None:
+        goal_pos = tuple(env.game.goal)
 
     while not done:
         steps += 1
@@ -110,7 +113,7 @@ def run_episode(mode, model, env, seed, interval=1, gate=None, log=None):
                 ppo_action=action,
                 agent_pos=agent_p,
                 monster_pos=monster_p,
-                goal_pos=(10, 10),
+                goal_pos=goal_pos,
                 env=env, surprisal=surprisal, log=log)
             if a is not None:
                 action = a
@@ -120,7 +123,7 @@ def run_episode(mode, model, env, seed, interval=1, gate=None, log=None):
             # 固定频率：从第 1 步起，每 interval 步调用一次
             if interval > 0 and ((steps - 1) % interval == 0):
                 a, masked, first_ok, ranking = _llm_pick(
-                    None, env, agent_p, monster_p, (10, 10), log)
+                    None, env, agent_p, monster_p, goal_pos, log)
                 if a is not None:
                     action = a
                     calls += 1
@@ -138,16 +141,29 @@ def run_episode(mode, model, env, seed, interval=1, gate=None, log=None):
 
 # ----------------------------------------------------------------------
 def evaluate(mode, episodes, base_seed, interval=1, tau=1.5, cooldown=5,
-             verbose=True):
+             verbose=True, env_factory=None, model_path=None,
+             predictor_path="prediction/monster_predictor.pth"):
+    """
+    env_factory:    可选，签名 (with_monster: bool) -> gym.Env。
+                    为 None 时使用固定地图的 MazeEnv + A_ENV_KWARGS。
+    model_path:     可选，底层策略权重路径（泛化实验里每张图有各自的策略）。
+    predictor_path: 可选，GRU 预测器权重（泛化实验里每张图需各自训练，
+                    因为巡逻路径不同，用固定地图的预测器会让惊讶度恒高）。
+    """
     from dual_system.gate_controller import SurprisalGateController
 
-    env = MazeEnv(with_monster=True, max_steps=A_MAX_STEPS, **A_ENV_KWARGS)
-    model = PPO.load(A_MODEL_PATH, env=env)
+    if env_factory is None:
+        def env_factory(with_monster):
+            return MazeEnv(with_monster=with_monster, max_steps=A_MAX_STEPS,
+                           **A_ENV_KWARGS)
+
+    env = env_factory(True)
+    model = PPO.load(model_path or A_MODEL_PATH, env=env)
 
     gate = None
     if mode == "C":
         gate = SurprisalGateController(
-            predictor_path="prediction/monster_predictor.pth", env=env,
+            predictor_path=predictor_path, env=env,
             tau=tau, max_ranking=3, cooldown_steps=cooldown, history_len=4)
         gate.reset()
 
@@ -163,7 +179,8 @@ def evaluate(mode, episodes, base_seed, interval=1, tau=1.5, cooldown=5,
             gate.cooldown_counter = 0
             gate.monster_history.clear()
         r = run_episode(mode, model, env, base_seed + ep * 100,
-                        interval=interval, gate=gate, log=log)
+                        interval=interval, gate=gate, log=log,
+                        goal_pos=tuple(env.game.goal))
         steps_all.append(r["steps"])
         rewards.append(r["reward"])
         calls_all.append(r["calls"])

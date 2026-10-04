@@ -39,6 +39,7 @@ from envs.maze import MazeEnv
 CONFIGS = {
     "baseline": dict(),                     # 现状行为
     "medium": dict(chase_radius=4, chase_prob=0.10, chase_len=6),   # 追击加强
+    "medium2": dict(chase_radius=4, chase_prob=0.15, chase_len=8),  # 中间档
     "strong": dict(chase_radius=5, chase_prob=0.15, chase_len=8,
                    monster_speed=2),        # 又凶又快
 }
@@ -118,6 +119,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="baseline",
                     choices=list(CONFIGS.keys()) + ["all"])
+    ap.add_argument("--tag", default=None,
+                    help="权重文件名标签，默认用 --config 的值。"
+                         "指定它可以在不覆盖已有基线的前提下训练新配置。")
     ap.add_argument("--timesteps", type=int, default=500_000)
     ap.add_argument("--episodes", type=int, default=100)
     ap.add_argument("--seed", type=int, default=42)
@@ -132,15 +136,16 @@ def main():
 
     for name in names:
         kw = CONFIGS[name]
+        tag = args.tag or name
         print("=" * 84)
-        print(f"配置 [{name}]  {kw if kw else '（现状行为）'}")
+        print(f"配置 [{name}]  权重标签 [{tag}]  {kw if kw else '（现状行为）'}")
         print("=" * 84)
 
         # ---- 训练两个策略：无怪 / 有怪 ----
         print("  训练中...")
-        m_no = train_one({**kw}, args.timesteps, args.seed, f"{name}_no_monster",
+        m_no = train_one({**kw}, args.timesteps, args.seed, f"{tag}_no_monster",
                          args.max_steps, with_monster=False, ent_coef=args.ent_coef)
-        m_yes = train_one({**kw}, args.timesteps, args.seed, f"{name}_with_monster",
+        m_yes = train_one({**kw}, args.timesteps, args.seed, f"{tag}_with_monster",
                           args.max_steps, with_monster=True,
                           curriculum=args.curriculum, ent_coef=args.ent_coef)
 

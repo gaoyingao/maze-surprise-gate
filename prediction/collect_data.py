@@ -43,9 +43,18 @@ MODE_PATROL, MODE_CHASE = 0, 1
 
 def collect(episodes=600, history_len=4, max_steps=A_MAX_STEPS,
             policy="random", seed_base=10000, env_kwargs=None,
-            save_path="prediction/predictor_data.npz", verbose=True):
+            save_path="prediction/predictor_data.npz", verbose=True,
+            env_factory=None):
+    """
+    env_factory: 可选，签名 (with_monster: bool) -> gym.Env。
+                 为 None 时用固定地图的 MazeEnv。泛化实验里每张地图
+                 需要各自的轨迹数据，因为巡逻路径不同。
+    """
     env_kwargs = dict(A_ENV_KWARGS if env_kwargs is None else env_kwargs)
-    env = MazeEnv(with_monster=True, max_steps=max_steps, **env_kwargs)
+    if env_factory is None:
+        env = MazeEnv(with_monster=True, max_steps=max_steps, **env_kwargs)
+    else:
+        env = env_factory(True)
 
     ppo = None
     if policy == "ppo":

@@ -63,9 +63,12 @@ class MazeGame:
         self.chase_prob = chase_prob
         self.chase_len = chase_len
         self.monster_speed = monster_speed
+        # 起点/终点（子类可覆盖，用于泛化实验的生成地图）
+        self.start = tuple(START)
+        self.goal = tuple(GOAL)
         # 起点/终点在任何配置下都必须是通路
-        assert self.grid[START] == 0, "起点被墙堵住"
-        assert self.grid[GOAL] == 0, "终点被墙堵住"
+        assert self.grid[self.start] == 0, "起点被墙堵住"
+        assert self.grid[self.goal] == 0, "终点被墙堵住"
         for p in self.patrol_path:
             assert self.grid[p] == 0, f"巡逻点 {p} 是墙"
         self.reset()
@@ -74,7 +77,7 @@ class MazeGame:
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
-        self.agent_pos = list(START)
+        self.agent_pos = list(self.start)
         # 无怪模式下把怪物放到地图外，确保它既不在观测里、也不可能碰撞。
         # 旧实现把它冻在 patrol_path[0]（如 (5,4)），虽然观测里被置零，
         # 但会把「有怪但不动」变成策略可分辨的分布外状态，污染对照实验。
@@ -173,7 +176,7 @@ class MazeGame:
         terminated = False
         truncated = False
         info = {"hit_wall": hit_wall}
-        if tuple(self.agent_pos) == GOAL:
+        if tuple(self.agent_pos) == self.goal:
             terminated = True
             info["status"] = "win"
         elif self.steps >= self.max_steps:
@@ -183,28 +186,90 @@ class MazeGame:
         return self.agent_pos, self.monster_pos, terminated, truncated, info
 
 
+# ======================================================================
+# 泛化实验：任意生成地图上的同规则游戏与环境
+# ======================================================================
+class MapMazeGame(MazeGame):
+    """
+    与 MazeGame 规则完全相同，但地图 / 起点 / 终点 / 巡逻路径
+    来自 envs.map_gen.generate_map 的 map_spec。
+
+    存在的意义：MazeGame 把 grid 写死为模块级 MAZE 常量，无法用于
+    泛化实验的多张随机地图。
+    """
+
+    def __init__(self, map_spec, with_monster=True, max_steps=200, **game_kwargs):
+        self.with_monster = with_monster
+        self.max_steps = max_steps
+        self.grid = np.array(map_spec["grid"], dtype=np.int32)
+        self.height, self.width = self.grid.shape
+        self.start = tuple(map_spec["start"])
+        self.goal = tuple(map_spec["goal"])
+        self.patrol_path = [tuple(p) for p in map_spec["patrol"]]
+        self.chase_radius = game_kwargs.get("chase_radius", 3)
+        self.chase_prob = game_kwargs.get("chase_prob", 0.05)
+        self.chase_len = game_kwargs.get("chase_len", 5)
+        self.monster_speed = game_kwargs.get("monster_speed", 1)
+        assert self.grid[self.start] == 0, "起点被墙堵住"
+        assert self.grid[self.goal] == 0, "终点被墙堵住"
+        for p in self.patrol_path:
+            assert self.grid[p] == 0, f"巡逻点 {p} 是墙"
+        self.reset()
+
+
 class MazeEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"]}
+
+    # 局部视野半径：观测量为 (2R+1)^2 的窗口。
+    # 注意：局部视野大小【不随地图尺寸变化】—— 这样同一个策略架构可以
+    # 在不同尺寸的地图上训练与评估，也是泛化实验能对比的前提。
+    VIEW_R = 2
 
     def __init__(self, with_monster=True, max_steps=200, **game_kwargs):
         """
         game_kwargs 透传给 MazeGame，用于配置怪物行为 / 追加墙体：
             extra_walls, patrol_path, chase_radius, chase_prob,
             chase_len, monster_speed
+
+        额外支持 map_spec（泛化实验用）：传入 envs.map_gen.generate_map 的
+        返回值，即可在任意尺寸的生成地图上构造环境。start/goal 随之改变。
         """
         super().__init__()
-        self.game = MazeGame(with_monster=with_monster, max_steps=max_steps,
-                             **game_kwargs)
+        self.map_spec = game_kwargs.pop("map_spec", None)
+        if self.map_spec is not None:
+            self.game = MapMazeGame(map_spec=self.map_spec,
+                                    with_monster=with_monster,
+                                    max_steps=max_steps, **game_kwargs)
+        else:
+            self.game = MazeGame(with_monster=with_monster, max_steps=max_steps,
+                                 **game_kwargs)
+
+        k = 2 * self.VIEW_R + 1
+        self._view_shape = (k, k)
+        # 观测 = 墙视野 k*k + 怪物视野 k*k + 自身 k*k + 怪物相对 2
+        #        + 终点相对 2 + 访问计数 1
+        self.obs_dim = 3 * k * k + 5
+        # 归一化分母：用实际地图边长，保证不同尺寸下尺度一致
+        self._norm = float(max(self.game.height, self.game.width) - 1)
+        # 访问计数表（破退化震荡用）
+        self._visits = {}
+
         self.action_space = spaces.Discrete(4)
         self.observation_space = spaces.Box(
             low=-1.0,
             high=1.0,
-            shape=(79,),
+            shape=(self.obs_dim,),
             dtype=np.float32
         )
 
     def _get_obs(self):
         ar, ac = self.game.agent_pos
+
+        # a) 访问计数标量：告诉策略"这个格子你来过几次"。
+        #    没有它时，观测是马尔可夫的 —— 原地来回震荡与探索在观测上
+        #    完全等价，策略会收敛到"在两个格子间反复横跳"的退化解
+        #    （实测 gen2 地图：200 步只访问 2 个不同格，全程超时）。
+        visit = float(self._visits.get((ar, ac), 0))
 
         # 无怪模式下怪物不在图中，用哨兵值，保证任何通道都不会出现它
         if self.game.with_monster:
@@ -212,14 +277,15 @@ class MazeEnv(gym.Env):
         else:
             mr, mc = -1, -1
 
-        gr, gc = GOAL
+        gr, gc = self.game.goal
 
-        view_wall = np.zeros((5, 5), dtype=np.float32)
-        view_monster = np.zeros((5, 5), dtype=np.float32)
-        view_agent = np.zeros((5, 5), dtype=np.float32)
+        k = 2 * self.VIEW_R + 1
+        view_wall = np.zeros((k, k), dtype=np.float32)
+        view_monster = np.zeros((k, k), dtype=np.float32)
+        view_agent = np.zeros((k, k), dtype=np.float32)
 
-        for i, dr in enumerate(range(-2, 3)):
-            for j, dc in enumerate(range(-2, 3)):
+        for i, dr in enumerate(range(-self.VIEW_R, self.VIEW_R + 1)):
+            for j, dc in enumerate(range(-self.VIEW_R, self.VIEW_R + 1)):
                 r, c = ar + dr, ac + dc
                 if 0 <= r < self.game.height and 0 <= c < self.game.width:
                     view_wall[i, j] = 1.0 if self.game.grid[r, c] == 1 else 0.0
@@ -238,31 +304,42 @@ class MazeEnv(gym.Env):
             view_agent.flatten()
         ])
 
+        n = self._norm
         if self.game.with_monster:
-            rel_monster = np.array([(mr - ar) / 11.0, (mc - ac) / 11.0], dtype=np.float32)
+            rel_monster = np.array([(mr - ar) / n, (mc - ac) / n],
+                                   dtype=np.float32)
         else:
             rel_monster = np.array([0.0, 0.0], dtype=np.float32)
 
-        rel_goal = np.array([(gr - ar) / 11.0, (gc - ac) / 11.0], dtype=np.float32)
+        rel_goal = np.array([(gr - ar) / n, (gc - ac) / n], dtype=np.float32)
+        # 归一化访问计数：>=5 次视为饱和
+        visit_feat = np.array([min(visit, 5.0) / 5.0], dtype=np.float32)
 
-        obs = np.concatenate([local_view, rel_monster, rel_goal]).astype(np.float32)
+        obs = np.concatenate([local_view, rel_monster, rel_goal,
+                              visit_feat]).astype(np.float32)
         return obs
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.game.reset(seed=seed)
+        self._visits = {}
+        self._visits[tuple(self.game.agent_pos)] = 1
         obs = self._get_obs()
         return obs, {}
 
     def step(self, action):
         prev_ar, prev_ac = self.game.agent_pos
-        prev_dist_goal = abs(prev_ar - GOAL[0]) + abs(prev_ac - GOAL[1])
+        prev_dist_goal = abs(prev_ar - self.game.goal[0]) + abs(prev_ac - self.game.goal[1])
 
         _, _, terminated, truncated, info = self.game.step(action)
-        obs = self._get_obs()
 
         curr_ar, curr_ac = self.game.agent_pos
-        curr_dist_goal = abs(curr_ar - GOAL[0]) + abs(curr_ac - GOAL[1])
+        curr_dist_goal = abs(curr_ar - self.game.goal[0]) + abs(curr_ac - self.game.goal[1])
+
+        # 累加访问计数（在 _get_obs 之前，使观测含"本次到达"）
+        key = (curr_ar, curr_ac)
+        self._visits[key] = self._visits.get(key, 0) + 1
+        obs = self._get_obs()
 
         # 1. 步数时间消耗（给前进压力）
         reward = -0.01
@@ -274,6 +351,12 @@ class MazeEnv(gym.Env):
             # 靠近终点奖励
             progress = prev_dist_goal - curr_dist_goal
             reward += progress * 0.1
+
+        # 2b. 重复访问惩罚 —— 破除"在两格之间反复横跳"的退化解。
+        #     纯马尔可夫观测下，原地震荡与探索在状态上无法区分，
+        #     策略会卡在 -0.01*n 的局部最优里（实测 gen2 图全程超时）。
+        #     每次回到同一格额外扣分，使震荡的代价高于一路向前。
+        reward -= 0.05 * min(self._visits[key] - 1, 4)
 
         # 3. 怪物危险感知惩罚（靠近怪物 <= 2 格扣分，鼓励绕道避险）
         if self.game.with_monster:
@@ -291,3 +374,22 @@ class MazeEnv(gym.Env):
             reward -= 10.0   # 超时摆烂直接判定重罚，逼它必须向前冲
 
         return obs, reward, terminated, truncated, info
+
+
+# ======================================================================
+# MapMazeEnv 的真实实现（必须定义在 MazeEnv 之后）
+# ======================================================================
+class MapMazeEnv(MazeEnv):
+    """
+    在生成地图上运行的 MazeEnv（泛化实验用）。
+
+    观测结构、奖励、终止条件全部继承 MazeEnv，只有地图来源不同 ——
+    这样 A/B/C 三组对照的环境语义在新地图上完全一致，
+    结果差异才能归因到触发机制，而不是环境实现差异。
+    """
+
+    def __init__(self, map_spec, with_monster=True, max_steps=200, **game_kwargs):
+        super().__init__(with_monster=with_monster, max_steps=max_steps,
+                         map_spec=map_spec, **game_kwargs)
+        # 基类已按 map_spec 构造 MapMazeGame，这里显式记录 spec 便于追溯
+        self.map_spec = map_spec

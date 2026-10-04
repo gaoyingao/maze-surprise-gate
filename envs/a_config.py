@@ -27,26 +27,52 @@ envs/a_config.py —— A 组基线环境的唯一配置源
 # A 组（带怪基线）环境配置 —— 直接展开给 MazeEnv(**A_ENV_KWARGS)
 A_ENV_KWARGS = dict(
     chase_radius=4,     # 进入 4 格内触发追击（原 3）
-    chase_prob=0.10,    # 每步 10% 随机触发（原 5%）
-    chase_len=6,        # 一次追击持续 6 步（原 5）
+    chase_prob=0.15,    # 每步 15% 随机触发（原 5%）
+    chase_len=8,        # 一次追击持续 8 步（原 5）
 )
 
 # A 组策略权重
-A_MODEL_PATH = "models/threat_medium_with_monster.zip"
+A_MODEL_PATH = "models/threat_medium2_with_monster.zip"
 
 # 评估口径（必须与 evaluate.py 一致）
 A_MAX_STEPS = 200
 A_BASE_SEED = 42
 
+# ----------------------------------------------------------------------
 # 威胁度标定结果（供报告引用）
+# ----------------------------------------------------------------------
+# ⚠️ Day 23 重要修正：修复"原地震荡"退化解后，原 12x12 地图的威胁度回落。
+#
+# 修复内容：观测加入"访问计数"标量（envs/maze.py）。
+#   没有它时，纯马尔可夫观测下"原地震荡"与"探索"在状态上完全等价，
+#   策略会收敛到在两格间反复横跳的退化解 —— 实测 gen2 地图 200 步只
+#   访问 2 个不同格，成功率 0%；加入后同一地图 0% -> 100%。
+#
+# 副作用：策略整体变强，原 12x12 地图的威胁落差下降：
+#   配置              seed42  seed777  seed2024   均值    最小
+#   medium (4/10%/6)   18pp    --       --       --       --
+#   medium2(4/15%/8)   20pp    12pp     14pp     15.3pp   12.0pp  ✗
+#   strong (5/15%/8+2) 100pp   --       --      100pp            （有怪 0%，退化）
+#
+# 结论：**原 12x12 地图在观测修复后无法稳定达到 20pp 门槛**。
+#   先前那 23.7pp 是策略退化"撑"出来的，不是真实威胁。
+#   泛化实验统一改用 16x16 生成地图（实测威胁度 42pp，A 组成功率 58%）。
 THREAT_MARGIN = dict(
-    config="medium",
+    config="medium2",
     no_monster_win=100.0,
-    with_monster_win=76.3,
-    margin_pp=23.7,
-    min_margin_pp=21.0,
+    with_monster_win=84.7,
+    margin_pp=15.3,
+    min_margin_pp=12.0,
     seeds=[42, 777, 2024],
     episodes_per_seed=100,
     threshold_pp=20.0,
-    passed=True,
+    passed=False,
+    note="原 12x12 地图偏简单，改用 16x16 生成地图做泛化实验",
+)
+
+# 泛化实验用的地图参数
+GEN_MAP_SIZE = 16
+GEN_THREAT_MARGIN = dict(
+    map="gen1_16", size=16, no_monster_win=100.0, with_monster_win=58.0,
+    margin_pp=42.0, passed=True,
 )

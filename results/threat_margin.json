@@ -25,8 +25,8 @@
       "chase_len": 6
     },
     "margin_same_policy_no": 90.0,
-    "margin_same_policy_yes": 29.0,
-    "margin_target": 29.0,
+    "margin_same_policy_yes": 18.0,
+    "margin_target": 18.0,
     "no_monster": {
       "win": 100.0,
       "die": 0.0,
@@ -34,10 +34,57 @@
       "steps": 18.0
     },
     "with_monster": {
-      "win": 71.0,
-      "die": 29.0,
+      "win": 82.0,
+      "die": 18.0,
+      "timeout": 0.0,
+      "steps": 18.26829268292683
+    },
+    "passed": false
+  },
+  "strong": {
+    "config": {
+      "chase_radius": 5,
+      "chase_prob": 0.15,
+      "chase_len": 8,
+      "monster_speed": 2
+    },
+    "margin_same_policy_no": 100.0,
+    "margin_same_policy_yes": 100.0,
+    "margin_target": 100.0,
+    "no_monster": {
+      "win": 100.0,
+      "die": 0.0,
       "timeout": 0.0,
       "steps": 18.0
+    },
+    "with_monster": {
+      "win": 0.0,
+      "die": 100.0,
+      "timeout": 0.0,
+      "steps": 0.0
+    },
+    "passed": true
+  },
+  "medium2": {
+    "config": {
+      "chase_radius": 4,
+      "chase_prob": 0.15,
+      "chase_len": 8
+    },
+    "margin_same_policy_no": 86.0,
+    "margin_same_policy_yes": 20.0,
+    "margin_target": 20.0,
+    "no_monster": {
+      "win": 100.0,
+      "die": 0.0,
+      "timeout": 0.0,
+      "steps": 18.0
+    },
+    "with_monster": {
+      "win": 80.0,
+      "die": 20.0,
+      "timeout": 0.0,
+      "steps": 18.375
     },
     "passed": true
   }
